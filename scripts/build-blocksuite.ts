@@ -294,7 +294,7 @@ async function main() {
       "dist/blocksuite-tgz",
     )
     .option("--skip-install", "Skip pnpm install inside AFFiNE", false)
-    .option("--clean", "Clean the pack directory before packing", false)
+    .option("--clean", "Clean the pack directory before packing", true)
     .option(
       "--repository <owner/repo>",
       "Target repository for the release (defaults to GITHUB_REPOSITORY)",
