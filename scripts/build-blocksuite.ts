@@ -335,17 +335,23 @@ async function generateOverrides(affineDir: string, packDir: string) {
   section("Generating pnpm.overrides configuration");
   const workspaces = await getBlocksuiteWorkspaces(affineDir);
   const overrides: Record<string, string> = {};
+  const overridesDir = resolve(REPO_ROOT, "dist");
+  await mkdirp(overridesDir);
+  const relativePackDir = relative(overridesDir, packDir);
 
   for (const ws of workspaces) {
     const filename = `${ws.name.replace("@", "").replace("/", "-")}.tgz`;
-    const relativeTgz = join(relative(REPO_ROOT, packDir), filename);
+    const relativeTgz = join(relativePackDir, filename);
     overrides[ws.name] = `file:./${relativeTgz}`;
   }
 
   log("Add the following to pnpm.overrides:", colors.bright);
   console.log(JSON.stringify(overrides, null, 2));
 
-  const overridesPath = resolve(REPO_ROOT, "blocksuite-overrides.json");
+  const overridesPath = resolve(
+    overridesDir,
+    "blocksuite-package-overrides.json",
+  );
   await writeFile(overridesPath, JSON.stringify(overrides, null, 2));
   log(`Saved overrides to ${overridesPath}`, colors.green);
 }
