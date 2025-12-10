@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "BlockSuite version to build (e.g., 0.25.5)"
+        description: "BlockSuite version to build (e.g., v0.25.5)"
         required: true
         type: string
       affine-ref:
-        description: "Override AFFiNE git ref (defaults to blocksuite@<version>)"
+        description: "Override AFFiNE git ref (defaults to the tag named <version>)"
         required: false
         type: string
       pack-dir:
