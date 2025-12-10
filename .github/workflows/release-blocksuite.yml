@@ -1,0 +1,70 @@
+name: Release BlockSuite packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "BlockSuite version to build (e.g., 0.25.5)"
+        required: true
+        type: string
+      affine-ref:
+        description: "Override AFFiNE git ref (defaults to blocksuite@<version>)"
+        required: false
+        type: string
+      pack-dir:
+        description: "Custom directory for generated .tgz files"
+        required: false
+        type: string
+      clean:
+        description: "Clean pack directory before packing"
+        required: false
+        default: true
+        type: boolean
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and upload BlockSuite release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ARGS=(
+            --version "${{ inputs.version }}"
+            --repository "${{ github.repository }}"
+          )
+
+          if [ -n "${{ inputs.affine-ref }}" ]; then
+            ARGS+=("--ref" "${{ inputs.affine-ref }}")
+          fi
+
+          if [ -n "${{ inputs.pack-dir }}" ]; then
+            ARGS+=("--pack-dir" "${{ inputs.pack-dir }}")
+          fi
+
+          if [ "${{ inputs.clean }}" = "true" ]; then
+            ARGS+=("--clean")
+          fi
+
+          pnpm run release-blocksuite -- "${ARGS[@]}"
+        shell: bash
