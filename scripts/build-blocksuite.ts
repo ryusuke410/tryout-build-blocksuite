@@ -281,7 +281,7 @@ async function main() {
     .requiredOption("--version <semver>", "BlockSuite version to package")
     .option(
       "--ref <git-ref>",
-      "AFFiNE git reference to check out (defaults to blocksuite@<version>)",
+      "AFFiNE git reference to check out (defaults to the tag named <version>)",
     )
     .option(
       "--affine-dir <path>",
@@ -305,15 +305,22 @@ async function main() {
     )
     .option(
       "--tag <tag>",
-      "Tag name used for the release (defaults to blocksuite@<version>)",
+      "Tag name used for the release (defaults to <version>)",
     )
     .action(async (options) => {
       const releaseOptions = options as ReleaseOptions;
-      const tag = releaseOptions.tag ?? `blocksuite@${releaseOptions.version}`;
+      const tag = releaseOptions.tag ?? releaseOptions.version;
+
       const affineRef = releaseOptions.affineRef ?? releaseOptions.ref ?? tag;
       const repository =
         releaseOptions.repository ?? process.env["GITHUB_REPOSITORY"];
       const token = releaseOptions.token ?? process.env["GITHUB_TOKEN"];
+
+      if (!affineRef) {
+        throw new Error(
+          "AFFiNE git ref must be provided via --ref, --affine-ref, or default from --version/--tag.",
+        );
+      }
 
       if (!repository || !repository.includes("/")) {
         throw new Error(
