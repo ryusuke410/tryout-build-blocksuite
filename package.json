@@ -10,7 +10,7 @@
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "check": "pnpm run format && pnpm run typecheck && pnpm run test"
+    "check": "(pnpm install --frozen-lockfile || pnpm install) && pnpm run format && pnpm run typecheck && pnpm run test"
   },
   "engines": {
     "node": ">=18"
