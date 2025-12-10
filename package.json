@@ -20,9 +20,9 @@
   "dependencies": {
     "@actions/artifact": "^4.0.0",
     "commander": "^12.1.0",
-    "execa": "^9.3.0",
     "fs-extra": "^11.2.0",
-    "@octokit/rest": "^21.0.2"
+    "@octokit/rest": "^21.0.2",
+    "zx": "^8.1.5"
   },
   "devDependencies": {
     "@types/node": "^22.5.4",
