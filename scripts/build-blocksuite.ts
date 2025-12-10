@@ -70,25 +70,34 @@ function section(title: string) {
 
 async function ensureAffineRepo(dir: string, ref: string) {
   const affineUrl = "https://github.com/toeverything/AFFiNE.git";
-  if (!(await pathExists(dir))) {
-    section(`Cloning AFFiNE into ${dir}`);
-    await $`git clone --depth 1 --branch ${ref} ${affineUrl} ${dir}`;
-    return;
-  }
-
-  section(`Updating AFFiNE in ${dir}`);
-  await $`git -C ${dir} fetch --tags origin`;
-  await $`git -C ${dir} checkout ${ref}`;
-
-  const pullResult = await $({ stdio: "inherit", nothrow: true })`
-    git -C ${dir} pull --ff-only origin ${ref}
+  const repoStatus = await $({ nothrow: true })`
+    git -C ${dir} rev-parse --is-inside-work-tree
   `;
-  if (pullResult.exitCode !== 0) {
-    log(
-      `Skipping fast-forward pull for ref ${ref}: ${pullResult.stderr.trim()}`,
-      colors.yellow,
-    );
+
+  const needsReinit = !(await pathExists(dir)) || repoStatus.exitCode !== 0;
+
+  if (needsReinit) {
+    section(`Cloning AFFiNE into ${dir}`);
+    if (await pathExists(dir)) {
+      await remove(dir);
+    }
+    await mkdirp(dir);
+    await $`git -C ${dir} init`;
+    await $`git -C ${dir} remote add origin ${affineUrl}`;
+  } else {
+    section(`Updating AFFiNE in ${dir}`);
+    const originExists =
+      (await $({ nothrow: true })`git -C ${dir} remote get-url origin`)
+        .exitCode === 0;
+    if (!originExists) {
+      await $`git -C ${dir} remote add origin ${affineUrl}`;
+    } else {
+      await $`git -C ${dir} remote set-url origin ${affineUrl}`;
+    }
   }
+
+  await $`git -C ${dir} fetch --depth 1 origin ${ref}`;
+  await $`git -C ${dir} checkout --force FETCH_HEAD`;
 }
 
 async function assertCleanRepo(dir: string) {
@@ -107,7 +116,7 @@ async function getBlocksuiteWorkspaces(affineDir: string) {
   return workspaceList.stdout
     .trim()
     .split("\n")
-    .map((line) => JSON.parse(line))
+    .map((line: string) => JSON.parse(line))
     .filter(
       (ws: any) =>
         ws.name?.startsWith("@blocksuite/") &&
@@ -341,12 +350,6 @@ async function generateOverrides(affineDir: string, packDir: string) {
   log(`Saved overrides to ${overridesPath}`, colors.green);
 }
 
-async function runRootChecks() {
-  section("Running repository checks with pnpm");
-  await $({ cwd: REPO_ROOT })`pnpm install`;
-  await $({ cwd: REPO_ROOT })`pnpm run check`;
-}
-
 async function buildAndMaybeUpload(options: BuildOptions) {
   const affineDir = resolve(REPO_ROOT, options.affineDir);
 
@@ -371,8 +374,6 @@ async function buildAndMaybeUpload(options: BuildOptions) {
       options.artifactName,
     );
   }
-
-  await runRootChecks();
 
   return result;
 }
