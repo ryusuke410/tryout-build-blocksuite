@@ -311,14 +311,16 @@ async function main() {
       const releaseOptions = options as ReleaseOptions;
       const tag = releaseOptions.tag ?? releaseOptions.version;
 
-      if (!tag) {
-        throw new Error("A tag must be provided via --tag or --version.");
-      }
-
       const affineRef = releaseOptions.affineRef ?? releaseOptions.ref ?? tag;
       const repository =
         releaseOptions.repository ?? process.env["GITHUB_REPOSITORY"];
       const token = releaseOptions.token ?? process.env["GITHUB_TOKEN"];
+
+      if (!affineRef) {
+        throw new Error(
+          "AFFiNE git ref must be provided via --ref, --affine-ref, or default from --version/--tag.",
+        );
+      }
 
       if (!repository || !repository.includes("/")) {
         throw new Error(
