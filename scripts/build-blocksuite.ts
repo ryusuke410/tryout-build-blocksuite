@@ -137,6 +137,38 @@ async function ensureBlocksuiteLocation(affineDir: string) {
   log(`Found BlockSuite at: ${blocksuiteDir}`, colors.green);
 }
 
+async function configureYarnVersion(affineDir: string) {
+  section("Configuring Yarn version");
+
+  await $({ cwd: affineDir })`corepack enable`;
+
+  const packageJsonPath = resolve(affineDir, "package.json");
+  if (!(await pathExists(packageJsonPath))) {
+    log(
+      "package.json not found in AFFiNE directory; using default Yarn.",
+      colors.yellow,
+    );
+    return;
+  }
+
+  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
+  const packageManager = packageJson.packageManager as string | undefined;
+  const yarnSpec = packageManager?.startsWith("yarn@")
+    ? packageManager
+    : undefined;
+
+  if (!yarnSpec) {
+    log(
+      "No Yarn packageManager entry found in AFFiNE package.json; using default Yarn.",
+      colors.yellow,
+    );
+    return;
+  }
+
+  await $({ cwd: affineDir })`corepack use ${yarnSpec}`;
+  log(`Activated Yarn version from packageManager: ${yarnSpec}`, colors.green);
+}
+
 async function installDependencies(dir: string, skipInstall: boolean) {
   if (skipInstall) {
     log("Skipping dependency installation.", colors.yellow);
@@ -149,6 +181,7 @@ async function installDependencies(dir: string, skipInstall: boolean) {
     env: {
       ...process.env,
       YARN_ENABLE_IMMUTABLE_INSTALLS: "1",
+      YARN_IGNORE_PATH: "1",
     },
   })`yarn install --immutable --check-cache`;
 }
@@ -156,7 +189,7 @@ async function installDependencies(dir: string, skipInstall: boolean) {
 async function buildBlocksuite(dir: string) {
   section("Building @blocksuite/* packages");
   await $({ cwd: dir, env: { ...process.env, YARN_IGNORE_PATH: "1" } })`
-    yarn workspaces foreach --topological-dev --include @blocksuite/* run build
+    yarn exec yarn workspaces foreach --all --topological-dev --include @blocksuite/* run build
   `;
 }
 
@@ -174,8 +207,8 @@ async function packBlocksuite(dir: string, packDir: string, clean: boolean) {
   for (const ws of workspaces) {
     const filename = `${ws.name.replace("@", "").replace("/", "-")}.tgz`;
     const outputPath = join(absolutePackDir, filename);
-    await $({ cwd: dir })`
-      yarn workspace ${ws.name} pack --out ${outputPath}
+    await $({ cwd: dir, env: { ...process.env, YARN_IGNORE_PATH: "1" } })`
+      yarn exec yarn workspace ${ws.name} pack --out ${outputPath}
     `;
     files.push(outputPath);
   }
@@ -320,6 +353,7 @@ async function buildAndMaybeUpload(options: BuildOptions) {
   await ensureAffineRepo(affineDir, options.ref);
   await assertCleanRepo(affineDir);
   await ensureBlocksuiteLocation(affineDir);
+  await configureYarnVersion(affineDir);
   await installDependencies(affineDir, options.skipInstall);
   await buildBlocksuite(affineDir);
   const result = await packBlocksuite(
