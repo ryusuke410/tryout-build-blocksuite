@@ -16,7 +16,7 @@ Thank you for helping improve this build helper! Please keep documentation, code
    pnpm run check
    ```
 
-   The command executes formatting, type checking, tests, and a build dry-run in sequence.
+   The command installs dependencies if needed, then executes formatting, type checking, tests, and a build dry-run in sequence. Keep this as the required Testing phase before opening a pull request or merging changes.
 
 3. Use the build helper locally to verify the BlockSuite artifacts can be produced:
 
