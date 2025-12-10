@@ -36,6 +36,7 @@ Thank you for helping improve this build helper! Please keep documentation, code
 - Use `pnpm run format` to normalize trailing whitespace and newlines.
 - Respect the strict TypeScript configuration in `tsconfig.json` and avoid reducing strictness.
 - Prefer small, focused commits that describe _why_ a change is needed.
+- Avoid optional function parameters unless a single, clear default value exists. Prefer explicit inputs and early validation over synthesizing fallback values.
 
 ## GitHub Actions artifacts
 
