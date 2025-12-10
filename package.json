@@ -10,8 +10,7 @@
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "build": "tsc --noEmit",
-    "check": "pnpm run format && pnpm run typecheck && pnpm run test && pnpm run build"
+    "check": "pnpm run format && pnpm run typecheck && pnpm run test"
   },
   "engines": {
     "node": ">=18"
