@@ -1,12 +1,26 @@
 #!/usr/bin/env node
 import { DefaultArtifactClient } from "@actions/artifact";
 import { Command } from "commander";
-import { execa } from "execa";
 import { mkdirp, pathExists, readdir, remove } from "fs-extra";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import process from "node:process";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { Octokit } from "@octokit/rest";
+import { $ } from "zx";
+
+$.verbose = true;
+
+/**
+ * Build BlockSuite packages from AFFiNE vendor directory
+ *
+ * This script:
+ * 1. Ensures the AFFiNE submodule is properly initialized and clean
+ * 2. Installs dependencies using yarn with an immutable lockfile
+ * 3. Builds all BlockSuite packages recursively
+ * 4. Packs all BlockSuite packages to .tgz files
+ * 5. Generates pnpm.overrides configuration for package.json
+ * 6. Runs pnpm install && pnpm run check to validate the repository
+ */
 
 interface BuildOptions {
   affineDir: string;
@@ -31,95 +45,147 @@ interface ReleaseOptions {
   tag?: string;
 }
 
-async function run(command: string, args: string[], cwd?: string) {
-  const options = { stdio: "inherit" as const, ...(cwd ? { cwd } : {}) };
-  await execa(command, args, options);
+const colors = {
+  reset: "\x1b[0m",
+  bright: "\x1b[1m",
+  green: "\x1b[32m",
+  yellow: "\x1b[33m",
+  blue: "\x1b[34m",
+  red: "\x1b[31m",
+};
+
+const REPO_ROOT = resolve(import.meta.dirname, "..");
+const DEFAULT_AFFINE_DIR = resolve(REPO_ROOT, "vendor/AFFiNE");
+
+function log(message: string, color = colors.reset) {
+  console.log(`${color}${message}${colors.reset}`);
 }
 
-function logStep(title: string) {
+function section(title: string) {
   const separator = "=".repeat(60);
-  console.log(`\n${separator}\n${title}\n${separator}`);
+  log(`\n${separator}`, colors.bright);
+  log(title, colors.bright + colors.blue);
+  log(separator, colors.bright);
 }
 
 async function ensureAffineRepo(dir: string, ref: string) {
   const affineUrl = "https://github.com/toeverything/AFFiNE.git";
   if (!(await pathExists(dir))) {
-    logStep(`Cloning AFFiNE into ${dir}`);
-    await run("git", [
-      "clone",
-      "--depth",
-      "1",
-      "--branch",
-      ref,
-      affineUrl,
-      dir,
-    ]);
+    section(`Cloning AFFiNE into ${dir}`);
+    await $`git clone --depth 1 --branch ${ref} ${affineUrl} ${dir}`;
     return;
   }
 
-  logStep(`Updating AFFiNE in ${dir}`);
-  await run("git", ["-C", dir, "fetch", "--tags", "origin"]);
-  await run("git", ["-C", dir, "checkout", ref]);
-  try {
-    await run("git", ["-C", dir, "pull", "--ff-only", "origin", ref]);
-  } catch (error) {
-    console.warn(
-      `Skipping fast-forward pull for ref ${ref}: ${(error as Error).message}`,
+  section(`Updating AFFiNE in ${dir}`);
+  await $`git -C ${dir} fetch --tags origin`;
+  await $`git -C ${dir} checkout ${ref}`;
+
+  const pullResult = await $({ stdio: "inherit", nothrow: true })`
+    git -C ${dir} pull --ff-only origin ${ref}
+  `;
+  if (pullResult.exitCode !== 0) {
+    log(
+      `Skipping fast-forward pull for ref ${ref}: ${pullResult.stderr.trim()}`,
+      colors.yellow,
     );
   }
 }
 
+async function assertCleanRepo(dir: string) {
+  const status = await $({ cwd: dir, nothrow: true })`git status --porcelain`;
+  if (status.stdout.trim()) {
+    throw new Error(
+      `AFFiNE repository at ${dir} has uncommitted changes. Please commit or stash them before building.`,
+    );
+  }
+}
+
+async function getBlocksuiteWorkspaces(affineDir: string) {
+  const workspaceList = await $({ cwd: affineDir })`
+    yarn workspaces list --json
+  `;
+  return workspaceList.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .filter(
+      (ws: any) =>
+        ws.name?.startsWith("@blocksuite/") &&
+        ws.location?.startsWith("blocksuite/"),
+    );
+}
+
+async function ensureBlocksuiteLocation(affineDir: string) {
+  section("Checking AFFiNE layout");
+  const blocksuiteDir = resolve(affineDir, "blocksuite");
+  if (!(await pathExists(affineDir))) {
+    throw new Error("AFFiNE directory is missing after clone.");
+  }
+
+  if (!(await pathExists(blocksuiteDir))) {
+    const packagesDir = resolve(affineDir, "packages");
+    log(`BlockSuite not found at ${blocksuiteDir}`, colors.red);
+    if (await pathExists(packagesDir)) {
+      log("Available packages:", colors.yellow);
+      for (const pkg of await readdir(packagesDir)) {
+        const pkgPath = resolve(packagesDir, pkg);
+        log(`- ${pkgPath}`, colors.yellow);
+      }
+    }
+    throw new Error("BlockSuite directory not found in AFFiNE repository");
+  }
+  log(`Found BlockSuite at: ${blocksuiteDir}`, colors.green);
+}
+
 async function installDependencies(dir: string, skipInstall: boolean) {
   if (skipInstall) {
-    console.log("Skipping dependency installation.");
+    log("Skipping dependency installation.", colors.yellow);
     return;
   }
 
-  logStep("Installing dependencies in AFFiNE");
-  await run("pnpm", ["install", "--frozen-lockfile"], dir);
+  section("Installing dependencies in AFFiNE with yarn");
+  await $({
+    cwd: dir,
+    env: {
+      ...process.env,
+      YARN_ENABLE_IMMUTABLE_INSTALLS: "1",
+    },
+  })`yarn install --immutable --check-cache`;
 }
 
 async function buildBlocksuite(dir: string) {
-  logStep("Building @blocksuite/* packages");
-  await run(
-    "pnpm",
-    ["--filter", "@blocksuite/*", "--recursive", "run", "build"],
-    dir,
-  );
+  section("Building @blocksuite/* packages");
+  await $({ cwd: dir, env: { ...process.env, YARN_IGNORE_PATH: "1" } })`
+    yarn workspaces foreach --topological-dev --include @blocksuite/* run build
+  `;
 }
 
 async function packBlocksuite(dir: string, packDir: string, clean: boolean) {
-  logStep(`Packing BlockSuite packages into ${packDir}`);
-  const absolutePackDir = resolve(packDir);
+  section(`Packing BlockSuite packages into ${packDir}`);
+  const absolutePackDir = resolve(REPO_ROOT, packDir);
 
   if (clean && (await pathExists(absolutePackDir))) {
     await remove(absolutePackDir);
   }
 
   await mkdirp(absolutePackDir);
-  await run(
-    "pnpm",
-    [
-      "--filter",
-      "@blocksuite/*",
-      "--recursive",
-      "pack",
-      "--pack-destination",
-      absolutePackDir,
-    ],
-    dir,
-  );
-
-  const files = (await readdir(absolutePackDir))
-    .filter((name: string) => name.endsWith(".tgz"))
-    .map((name: string) => join(absolutePackDir, name));
+  const workspaces = await getBlocksuiteWorkspaces(dir);
+  const files: string[] = [];
+  for (const ws of workspaces) {
+    const filename = `${ws.name.replace("@", "").replace("/", "-")}.tgz`;
+    const outputPath = join(absolutePackDir, filename);
+    await $({ cwd: dir })`
+      yarn workspace ${ws.name} pack --out ${outputPath}
+    `;
+    files.push(outputPath);
+  }
 
   if (!files.length) {
     throw new Error("No BlockSuite package tarballs were produced.");
   }
 
-  console.log(`Packed ${files.length} files:`);
-  files.forEach((file: string) => console.log(`- ${file}`));
+  log(`Packed ${files.length} files:`, colors.green);
+  files.forEach((file: string) => log(`- ${file}`));
   return { absolutePackDir, files };
 }
 
@@ -130,16 +196,18 @@ async function uploadArtifact(
 ) {
   const isRunningInActions = process.env["GITHUB_ACTIONS"] === "true";
   if (!isRunningInActions) {
-    console.warn(
+    log(
       "Artifact upload requested, but this is not running inside GitHub Actions. Skipping.",
+      colors.yellow,
     );
     return;
   }
 
   const client = new DefaultArtifactClient();
   await client.uploadArtifact(artifactName, files, dir);
-  console.log(
+  log(
     `Uploaded artifact "${artifactName}" with ${files.length} files.`,
+    colors.green,
   );
 }
 
@@ -160,7 +228,7 @@ async function ensureRelease(
       "status" in error &&
       (error as { status?: number }).status === 404
     ) {
-      console.log(`Release for tag ${tag} not found. Creating...`);
+      log(`Release for tag ${tag} not found. Creating...`, colors.yellow);
       const created = await octokit.repos.createRelease({
         owner,
         repo,
@@ -197,7 +265,7 @@ async function uploadReleaseAssets(
 
     const existingId = existingNames.get(name);
     if (existingId) {
-      console.log(`Deleting existing asset ${name} before upload...`);
+      log(`Deleting existing asset ${name} before upload...`, colors.yellow);
       await octokit.repos.deleteReleaseAsset({
         owner,
         repo,
@@ -206,7 +274,7 @@ async function uploadReleaseAssets(
     }
 
     const buffer = Buffer.from(await readFile(file));
-    console.log(`Uploading asset ${name} (${buffer.byteLength} bytes)...`);
+    log(`Uploading asset ${name} (${buffer.byteLength} bytes)...`, colors.blue);
     await octokit.repos.uploadReleaseAsset({
       owner,
       repo,
@@ -221,10 +289,37 @@ async function uploadReleaseAssets(
   }
 }
 
+async function generateOverrides(affineDir: string, packDir: string) {
+  section("Generating pnpm.overrides configuration");
+  const workspaces = await getBlocksuiteWorkspaces(affineDir);
+  const overrides: Record<string, string> = {};
+
+  for (const ws of workspaces) {
+    const filename = `${ws.name.replace("@", "").replace("/", "-")}.tgz`;
+    const relativeTgz = join(relative(REPO_ROOT, packDir), filename);
+    overrides[ws.name] = `file:./${relativeTgz}`;
+  }
+
+  log("Add the following to pnpm.overrides:", colors.bright);
+  console.log(JSON.stringify(overrides, null, 2));
+
+  const overridesPath = resolve(REPO_ROOT, "blocksuite-overrides.json");
+  await writeFile(overridesPath, JSON.stringify(overrides, null, 2));
+  log(`Saved overrides to ${overridesPath}`, colors.green);
+}
+
+async function runRootChecks() {
+  section("Running repository checks with pnpm");
+  await $({ cwd: REPO_ROOT })`pnpm install`;
+  await $({ cwd: REPO_ROOT })`pnpm run check`;
+}
+
 async function buildAndMaybeUpload(options: BuildOptions) {
-  const affineDir = resolve(options.affineDir);
+  const affineDir = resolve(REPO_ROOT, options.affineDir);
 
   await ensureAffineRepo(affineDir, options.ref);
+  await assertCleanRepo(affineDir);
+  await ensureBlocksuiteLocation(affineDir);
   await installDependencies(affineDir, options.skipInstall);
   await buildBlocksuite(affineDir);
   const result = await packBlocksuite(
@@ -233,6 +328,8 @@ async function buildAndMaybeUpload(options: BuildOptions) {
     options.clean,
   );
 
+  await generateOverrides(affineDir, result.absolutePackDir);
+
   if (options.upload) {
     await uploadArtifact(
       result.absolutePackDir,
@@ -240,6 +337,8 @@ async function buildAndMaybeUpload(options: BuildOptions) {
       options.artifactName,
     );
   }
+
+  await runRootChecks();
 
   return result;
 }
@@ -253,7 +352,7 @@ async function main() {
     .option(
       "--affine-dir <path>",
       "Destination for the AFFiNE clone",
-      "vendor/AFFiNE",
+      DEFAULT_AFFINE_DIR,
     )
     .option("--ref <git-ref>", "Git reference to check out", "main")
     .option(
@@ -261,7 +360,7 @@ async function main() {
       "Output directory for package tarballs",
       "dist/blocksuite-tgz",
     )
-    .option("--skip-install", "Skip pnpm install inside AFFiNE", false)
+    .option("--skip-install", "Skip yarn install inside AFFiNE", false)
     .option("--upload", "Upload tarballs as a GitHub Actions artifact", false)
     .option(
       "--artifact-name <name>",
@@ -286,14 +385,14 @@ async function main() {
     .option(
       "--affine-dir <path>",
       "Destination for the AFFiNE clone",
-      "vendor/AFFiNE",
+      DEFAULT_AFFINE_DIR,
     )
     .option(
       "--pack-dir <path>",
       "Output directory for package tarballs",
       "dist/blocksuite-tgz",
     )
-    .option("--skip-install", "Skip pnpm install inside AFFiNE", false)
+    .option("--skip-install", "Skip yarn install inside AFFiNE", false)
     .option("--clean", "Clean the pack directory before packing", true)
     .option(
       "--repository <owner/repo>",
