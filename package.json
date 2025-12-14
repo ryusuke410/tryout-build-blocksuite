@@ -7,6 +7,7 @@
   "scripts": {
     "build-blocksuite": "vite-node scripts/build-blocksuite.ts",
     "release-blocksuite": "vite-node scripts/build-blocksuite.ts release",
+    "compare-blocksuite": "vite-node scripts/compare-blocksuite.ts",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",

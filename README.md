@@ -28,7 +28,9 @@ This repository keeps a reproducible workflow for building the BlockSuite packag
    pnpm run check
    ```
 
-3. Build BlockSuite packages and pack them into `.tgz` files (default output: `dist/blocksuite-tgz`):
+3. Build BlockSuite packages and pack them into `.tgz` files (default output: `dist/blocksuite-tgz`).
+   The script automatically patches BlockSuite `package.json` files so the packed artifacts export the compiled `dist` outputs
+   instead of raw `src/*.ts` files:
 
    ```bash
    pnpm run build-blocksuite -- --ref main
@@ -46,23 +48,33 @@ This repository keeps a reproducible workflow for building the BlockSuite packag
    pnpm run release-blocksuite -- --version v0.25.5 --repository <owner/repo>
    ```
 
-   The command will create or reuse the `v0.25.5` release tag, build the matching artifacts from AFFiNE (using `v0.25.5` as the default git ref), and upload each package tarball as a release asset.
+   The command will create or reuse the `v0.25.5` release tag, build the matching artifacts from the configured source repository (using `v0.25.5` as the default git ref), and upload each package tarball as a release asset.
 
 6. Dispatch the GitHub Actions workflow to build and publish artifacts directly from this repository (no local setup required):
    - Navigate to **Actions → Release BlockSuite packages → Run workflow**.
    - Provide the `version` (e.g., `v0.25.5`). Optional inputs let you override the AFFiNE git ref, choose a custom pack directory, or disable the cleanup step.
    - The workflow will ensure the `<version>` release exists in this repository, replace any assets with matching filenames, and upload the freshly built `.tgz` files.
 
+7. Verify that the historical `@blocksuite/blocks@v0.19.5` tarball built from the upstream BlockSuite repository matches the package published to npm:
+
+   ```bash
+   pnpm run compare-blocksuite -- --version v0.19.5 --ref v0.19.5 --package-name @blocksuite/blocks
+   ```
+
+   The command builds only the requested package from `https://github.com/toeverything/blocksuite.git`, downloads the npm tarball, extracts both, and fails if any file differs.
+
 ## Script overview
 
 `scripts/build-blocksuite.ts` performs these steps:
 
-1. Clone or update `https://github.com/toeverything/AFFiNE` into `vendor/AFFiNE` (override with `--affine-dir`).
+1. Clone or update the configured source repository (default: `https://github.com/toeverything/AFFiNE.git`) into `--affine-dir`.
 2. Check out the requested git reference (default: `main`).
-3. Install dependencies in the AFFiNE workspace with `pnpm install --frozen-lockfile`.
-4. Build every `@blocksuite/*` workspace with `pnpm --filter @blocksuite/* run build --recursive`.
-5. Pack each BlockSuite package to `.tgz` files in `dist/blocksuite-tgz`.
-6. Optionally upload the packed files as a GitHub Actions artifact.
+3. Patch each `@blocksuite/*` workspace `package.json` so `publishConfig.exports` points to the compiled `dist` files
+   (avoiding the upstream issue where newer releases exported `src/*.ts` and broke consumer type-checking).
+4. Install dependencies in the AFFiNE workspace with `pnpm install --frozen-lockfile`.
+5. Build every `@blocksuite/*` workspace with `pnpm --filter @blocksuite/* run build --recursive`.
+6. Pack each BlockSuite package to `.tgz` files in `dist/blocksuite-tgz`.
+7. Optionally upload the packed files as a GitHub Actions artifact.
 
 ## CLI options
 
@@ -70,9 +82,10 @@ This repository keeps a reproducible workflow for building the BlockSuite packag
 pnpm run build-blocksuite -- [options]
 ```
 
-- `--affine-dir <path>`: Destination for the AFFiNE clone. Default: `vendor/AFFiNE`.
+- `--affine-dir <path>`: Destination for the repository clone. Default: `vendor/AFFiNE`.
 - `--ref <git-ref>`: Branch, tag, or commit to check out. Default: `main`.
 - `--pack-dir <path>`: Directory for generated `.tgz` files. Default: `dist/blocksuite-tgz`.
+- `--packages <names...>`: Optional list of `@blocksuite/*` workspaces to pack (defaults to all workspaces).
 - `--skip-install`: Skip `pnpm install` inside AFFiNE (use only if dependencies are already installed).
 - `--upload`: Upload the packed files as a GitHub Actions artifact.
 - `--artifact-name <name>`: Custom artifact name. Default: `blocksuite-packages`.

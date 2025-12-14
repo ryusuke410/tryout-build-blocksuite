@@ -26,10 +26,13 @@ interface BuildOptions {
   affineDir: string;
   ref: string;
   packDir: string;
+  packages?: string[];
   skipInstall: boolean;
   upload: boolean;
   artifactName: string;
   clean: boolean;
+  sourceRepo: string;
+  excludeWorkspaces: string[];
 }
 
 interface ReleaseOptions {
@@ -38,8 +41,11 @@ interface ReleaseOptions {
   ref?: string;
   affineDir: string;
   packDir: string;
+  packages?: string[];
   skipInstall: boolean;
   clean: boolean;
+  sourceRepo: string;
+  excludeWorkspaces: string[];
   repository?: string;
   token?: string;
   tag?: string;
@@ -56,6 +62,11 @@ const colors = {
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 const DEFAULT_AFFINE_DIR = resolve(REPO_ROOT, "vendor/AFFiNE");
+const DEFAULT_SOURCE_REPO = "https://github.com/toeverything/AFFiNE.git";
+const DEFAULT_EXCLUDED_WORKSPACES = [
+  "@blocksuite/e2e",
+  "@blocksuite/playground",
+];
 
 function log(message: string, color = colors.reset) {
   console.log(`${color}${message}${colors.reset}`);
@@ -68,8 +79,7 @@ function section(title: string) {
   log(separator, colors.bright);
 }
 
-async function ensureAffineRepo(dir: string, ref: string) {
-  const affineUrl = "https://github.com/toeverything/AFFiNE.git";
+async function ensureAffineRepo(dir: string, ref: string, sourceRepo: string) {
   const repoStatus = await $({ nothrow: true })`
     git -C ${dir} rev-parse --is-inside-work-tree
   `;
@@ -83,16 +93,16 @@ async function ensureAffineRepo(dir: string, ref: string) {
     }
     await mkdirp(dir);
     await $`git -C ${dir} init`;
-    await $`git -C ${dir} remote add origin ${affineUrl}`;
+    await $`git -C ${dir} remote add origin ${sourceRepo}`;
   } else {
     section(`Updating AFFiNE in ${dir}`);
     const originExists =
       (await $({ nothrow: true })`git -C ${dir} remote get-url origin`)
         .exitCode === 0;
     if (!originExists) {
-      await $`git -C ${dir} remote add origin ${affineUrl}`;
+      await $`git -C ${dir} remote add origin ${sourceRepo}`;
     } else {
-      await $`git -C ${dir} remote set-url origin ${affineUrl}`;
+      await $`git -C ${dir} remote set-url origin ${sourceRepo}`;
     }
   }
 
@@ -117,33 +127,129 @@ async function getBlocksuiteWorkspaces(affineDir: string) {
     .trim()
     .split("\n")
     .map((line: string) => JSON.parse(line))
-    .filter(
-      (ws: any) =>
-        ws.name?.startsWith("@blocksuite/") &&
-        ws.location?.startsWith("blocksuite/"),
-    );
+    .filter((ws: any) => ws.name?.startsWith("@blocksuite/"));
 }
 
 async function ensureBlocksuiteLocation(affineDir: string) {
-  section("Checking AFFiNE layout");
-  const blocksuiteDir = resolve(affineDir, "blocksuite");
+  section("Checking repository layout");
   if (!(await pathExists(affineDir))) {
-    throw new Error("AFFiNE directory is missing after clone.");
+    throw new Error("Source directory is missing after clone.");
   }
 
-  if (!(await pathExists(blocksuiteDir))) {
+  const workspaces = await getBlocksuiteWorkspaces(affineDir);
+  if (!workspaces.length) {
     const packagesDir = resolve(affineDir, "packages");
-    log(`BlockSuite not found at ${blocksuiteDir}`, colors.red);
-    if (await pathExists(packagesDir)) {
-      log("Available packages:", colors.yellow);
-      for (const pkg of await readdir(packagesDir)) {
-        const pkgPath = resolve(packagesDir, pkg);
-        log(`- ${pkgPath}`, colors.yellow);
-      }
+    const entries = (await pathExists(packagesDir))
+      ? await readdir(packagesDir)
+      : [];
+
+    log("No @blocksuite/* workspaces detected.", colors.red);
+    if (entries.length) {
+      log("Found packages directory entries:", colors.yellow);
+      entries.forEach((pkg) => log(`- ${resolve(packagesDir, pkg)}`));
     }
-    throw new Error("BlockSuite directory not found in AFFiNE repository");
+    throw new Error("Repository does not contain any @blocksuite/* workspaces");
   }
-  log(`Found BlockSuite at: ${blocksuiteDir}`, colors.green);
+
+  log(`Found ${workspaces.length} @blocksuite/* workspaces`, colors.green);
+}
+
+function convertSrcExport(target: string) {
+  if (!target.startsWith("./src/")) return undefined;
+
+  const distBase = target
+    .replace(/^\.\/src\//, "./dist/")
+    .replace(/\.tsx?$/, "");
+
+  return {
+    types: `${distBase}.d.ts`,
+    import: `${distBase}.js`,
+  } as const;
+}
+
+function rewriteExportsField(exportsField: unknown): unknown {
+  if (typeof exportsField === "string") {
+    return convertSrcExport(exportsField) ?? exportsField;
+  }
+
+  if (exportsField && typeof exportsField === "object") {
+    return Object.fromEntries(
+      Object.entries(exportsField as Record<string, unknown>).map(
+        ([key, value]) => {
+          if (typeof value === "string") {
+            return [key, convertSrcExport(value) ?? value];
+          }
+
+          if (value && typeof value === "object") {
+            const nested = Object.fromEntries(
+              Object.entries(value as Record<string, unknown>).map(
+                ([nestedKey, nestedValue]) => [
+                  nestedKey,
+                  typeof nestedValue === "string"
+                    ? (convertSrcExport(nestedValue) ?? nestedValue)
+                    : nestedValue,
+                ],
+              ),
+            );
+
+            return [key, nested];
+          }
+
+          return [key, value];
+        },
+      ),
+    );
+  }
+
+  return exportsField;
+}
+
+async function patchBlocksuitePublishConfig(affineDir: string) {
+  section("Patching BlockSuite publish configuration");
+  const workspaces = await getBlocksuiteWorkspaces(affineDir);
+
+  if (!workspaces.length) {
+    log(
+      "No @blocksuite/* workspaces detected; skipping patch step.",
+      colors.yellow,
+    );
+    return;
+  }
+
+  for (const ws of workspaces) {
+    const packageJsonPath = resolve(affineDir, ws.location, "package.json");
+    const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
+
+    const alreadyPatched = Boolean(packageJson.publishConfig?.exports);
+    if (alreadyPatched) {
+      log(
+        `publishConfig.exports already present for ${ws.name}; skipping.`,
+        colors.green,
+      );
+      continue;
+    }
+
+    const rewrittenExports = rewriteExportsField(packageJson.exports);
+
+    if (rewrittenExports === packageJson.exports) {
+      log(
+        `No src-based exports found for ${ws.name}; leaving package.json unchanged.`,
+        colors.yellow,
+      );
+      continue;
+    }
+
+    packageJson.publishConfig = {
+      ...(packageJson.publishConfig ?? {}),
+      exports: rewrittenExports,
+    };
+
+    await writeFile(
+      packageJsonPath,
+      JSON.stringify(packageJson, null, 2) + "\n",
+    );
+    log(`Added publishConfig.exports for ${ws.name}`, colors.green);
+  }
 }
 
 async function configureYarnVersion(affineDir: string) {
@@ -195,14 +301,21 @@ async function installDependencies(dir: string, skipInstall: boolean) {
   })`yarn install --immutable --check-cache`;
 }
 
-async function buildBlocksuite(dir: string) {
+async function buildBlocksuite(dir: string, excludeWorkspaces: string[]) {
   section("Building @blocksuite/* packages");
+  const excludeArgs = excludeWorkspaces.flatMap((name) => ["--exclude", name]);
+
   await $({ cwd: dir, env: { ...process.env, YARN_IGNORE_PATH: "1" } })`
-    yarn exec yarn workspaces foreach --all --topological-dev --include @blocksuite/* run build
+    yarn exec yarn workspaces foreach --all --topological-dev --include @blocksuite/* ${excludeArgs} run build
   `;
 }
 
-async function packBlocksuite(dir: string, packDir: string, clean: boolean) {
+async function packBlocksuite(
+  dir: string,
+  packDir: string,
+  clean: boolean,
+  packages?: string[],
+) {
   section(`Packing BlockSuite packages into ${packDir}`);
   const absolutePackDir = resolve(REPO_ROOT, packDir);
 
@@ -212,8 +325,18 @@ async function packBlocksuite(dir: string, packDir: string, clean: boolean) {
 
   await mkdirp(absolutePackDir);
   const workspaces = await getBlocksuiteWorkspaces(dir);
+  const workspaceMap = new Map(workspaces.map((ws) => [ws.name, ws]));
+  const targets = packages?.length
+    ? packages.map((name) => {
+        const ws = workspaceMap.get(name);
+        if (!ws) {
+          throw new Error(`Workspace ${name} was not found in the repo.`);
+        }
+        return ws;
+      })
+    : workspaces;
   const files: string[] = [];
-  for (const ws of workspaces) {
+  for (const ws of targets) {
     const filename = `${ws.name.replace("@", "").replace("/", "-")}.tgz`;
     const outputPath = join(absolutePackDir, filename);
     await $({ cwd: dir, env: { ...process.env, YARN_IGNORE_PATH: "1" } })`
@@ -358,17 +481,24 @@ async function generateOverrides(affineDir: string, packDir: string) {
 
 async function buildAndMaybeUpload(options: BuildOptions) {
   const affineDir = resolve(REPO_ROOT, options.affineDir);
+  const excludeWorkspaces =
+    options.excludeWorkspaces?.length &&
+    Array.isArray(options.excludeWorkspaces)
+      ? options.excludeWorkspaces
+      : DEFAULT_EXCLUDED_WORKSPACES;
 
-  await ensureAffineRepo(affineDir, options.ref);
+  await ensureAffineRepo(affineDir, options.ref, options.sourceRepo);
   await assertCleanRepo(affineDir);
   await ensureBlocksuiteLocation(affineDir);
+  await patchBlocksuitePublishConfig(affineDir);
   await configureYarnVersion(affineDir);
   await installDependencies(affineDir, options.skipInstall);
-  await buildBlocksuite(affineDir);
+  await buildBlocksuite(affineDir, excludeWorkspaces);
   const result = await packBlocksuite(
     affineDir,
     options.packDir,
     options.clean,
+    options.packages,
   );
 
   await generateOverrides(affineDir, result.absolutePackDir);
@@ -401,6 +531,20 @@ async function main() {
       "Output directory for package tarballs",
       "dist/blocksuite-tgz",
     )
+    .option(
+      "--packages <names...>",
+      "Subset of @blocksuite/* workspaces to pack",
+    )
+    .option(
+      "--exclude-workspaces <names...>",
+      "@blocksuite/* workspaces to skip during the build step",
+      DEFAULT_EXCLUDED_WORKSPACES,
+    )
+    .option(
+      "--source-repo <url>",
+      "Git repository containing BlockSuite workspaces",
+      DEFAULT_SOURCE_REPO,
+    )
     .option("--skip-install", "Skip yarn install inside AFFiNE", false)
     .option("--upload", "Upload tarballs as a GitHub Actions artifact", false)
     .option(
@@ -432,6 +576,20 @@ async function main() {
       "--pack-dir <path>",
       "Output directory for package tarballs",
       "dist/blocksuite-tgz",
+    )
+    .option(
+      "--packages <names...>",
+      "Subset of @blocksuite/* workspaces to pack",
+    )
+    .option(
+      "--exclude-workspaces <names...>",
+      "@blocksuite/* workspaces to skip during the build step",
+      DEFAULT_EXCLUDED_WORKSPACES,
+    )
+    .option(
+      "--source-repo <url>",
+      "Git repository containing BlockSuite workspaces",
+      DEFAULT_SOURCE_REPO,
     )
     .option("--skip-install", "Skip yarn install inside AFFiNE", false)
     .option("--clean", "Clean the pack directory before packing", true)
@@ -486,10 +644,16 @@ async function main() {
         affineDir: releaseOptions.affineDir,
         ref: affineRef,
         packDir: releaseOptions.packDir,
+        ...(releaseOptions.packages
+          ? { packages: releaseOptions.packages }
+          : {}),
         skipInstall: releaseOptions.skipInstall,
         upload: false,
         artifactName: "",
         clean: releaseOptions.clean,
+        sourceRepo: releaseOptions.sourceRepo ?? DEFAULT_SOURCE_REPO,
+        excludeWorkspaces:
+          releaseOptions.excludeWorkspaces ?? DEFAULT_EXCLUDED_WORKSPACES,
       });
 
       const release = await ensureRelease(
