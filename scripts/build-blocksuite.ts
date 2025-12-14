@@ -51,6 +51,11 @@ interface ReleaseOptions {
   tag?: string;
 }
 
+type YarnWorkspace = {
+  name: string;
+  location: string;
+};
+
 const colors = {
   reset: "\x1b[0m",
   bright: "\x1b[1m",
@@ -77,6 +82,127 @@ function section(title: string) {
   log(`\n${separator}`, colors.bright);
   log(title, colors.bright + colors.blue);
   log(separator, colors.bright);
+}
+
+function isYarnWorkspace(value: unknown): value is YarnWorkspace {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const workspace = value as { name?: unknown; location?: unknown };
+
+  return (
+    typeof workspace.name === "string" && typeof workspace.location === "string"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function ensureStringArray(value: unknown, fieldName: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new Error(`${fieldName} must be an array of strings.`);
+  }
+
+  return value;
+}
+
+function parseBuildOptions(options: unknown): BuildOptions {
+  if (!isRecord(options)) {
+    throw new Error("Invalid CLI options provided to build-blocksuite.");
+  }
+
+  const packages =
+    options.packages === undefined
+      ? undefined
+      : ensureStringArray(options.packages, "packages");
+  const excludeWorkspaces = options.excludeWorkspaces
+    ? ensureStringArray(options.excludeWorkspaces, "excludeWorkspaces")
+    : DEFAULT_EXCLUDED_WORKSPACES;
+
+  if (
+    typeof options.affineDir !== "string" ||
+    typeof options.ref !== "string" ||
+    typeof options.packDir !== "string" ||
+    typeof options.skipInstall !== "boolean" ||
+    typeof options.upload !== "boolean" ||
+    typeof options.artifactName !== "string" ||
+    typeof options.clean !== "boolean" ||
+    typeof options.sourceRepo !== "string"
+  ) {
+    throw new Error("Invalid CLI options provided to build-blocksuite.");
+  }
+
+  return {
+    affineDir: options.affineDir,
+    ref: options.ref,
+    packDir: options.packDir,
+    packages,
+    skipInstall: options.skipInstall,
+    upload: options.upload,
+    artifactName: options.artifactName,
+    clean: options.clean,
+    sourceRepo: options.sourceRepo,
+    excludeWorkspaces,
+  };
+}
+
+function parseReleaseOptions(options: unknown): ReleaseOptions {
+  if (!isRecord(options)) {
+    throw new Error("Invalid release options provided to build-blocksuite.");
+  }
+
+  const packages =
+    options.packages === undefined
+      ? undefined
+      : ensureStringArray(options.packages, "packages");
+  const excludeWorkspaces = options.excludeWorkspaces
+    ? ensureStringArray(options.excludeWorkspaces, "excludeWorkspaces")
+    : DEFAULT_EXCLUDED_WORKSPACES;
+
+  if (
+    typeof options.version !== "string" ||
+    typeof options.affineDir !== "string" ||
+    typeof options.packDir !== "string" ||
+    typeof options.skipInstall !== "boolean" ||
+    typeof options.clean !== "boolean" ||
+    typeof options.sourceRepo !== "string"
+  ) {
+    throw new Error("Invalid release options provided to build-blocksuite.");
+  }
+
+  const optionalStrings: Array<[keyof ReleaseOptions, unknown]> = [
+    ["affineRef", options.affineRef],
+    ["ref", options.ref],
+    ["repository", options.repository],
+    ["token", options.token],
+    ["tag", options.tag],
+  ];
+
+  optionalStrings.forEach(([key, value]) => {
+    if (value !== undefined && typeof value !== "string") {
+      throw new Error(`${key} must be a string when provided.`);
+    }
+  });
+
+  return {
+    version: options.version,
+    affineRef:
+      typeof options.affineRef === "string" ? options.affineRef : undefined,
+    ref: typeof options.ref === "string" ? options.ref : undefined,
+    affineDir: options.affineDir,
+    packDir: options.packDir,
+    packages,
+    skipInstall: options.skipInstall,
+    clean: options.clean,
+    sourceRepo: options.sourceRepo,
+    excludeWorkspaces,
+    repository:
+      typeof options.repository === "string" ? options.repository : undefined,
+    token: typeof options.token === "string" ? options.token : undefined,
+    tag: typeof options.tag === "string" ? options.tag : undefined,
+  };
 }
 
 async function ensureAffineRepo(dir: string, ref: string, sourceRepo: string) {
@@ -123,11 +249,13 @@ async function getBlocksuiteWorkspaces(affineDir: string) {
   const workspaceList = await $({ cwd: affineDir })`
     yarn workspaces list --json
   `;
+
   return workspaceList.stdout
     .trim()
     .split("\n")
-    .map((line: string) => JSON.parse(line))
-    .filter((ws: any) => ws.name?.startsWith("@blocksuite/"));
+    .map((line: string) => JSON.parse(line) as unknown)
+    .filter(isYarnWorkspace)
+    .filter((workspace) => workspace.name.startsWith("@blocksuite/"));
 }
 
 async function ensureBlocksuiteLocation(affineDir: string) {
@@ -155,7 +283,9 @@ async function ensureBlocksuiteLocation(affineDir: string) {
 }
 
 function convertSrcExport(target: string) {
-  if (!target.startsWith("./src/")) return undefined;
+  if (!target.startsWith("./src/")) {
+    return undefined;
+  }
 
   const distBase = target
     .replace(/^\.\/src\//, "./dist/")
@@ -172,34 +302,30 @@ function rewriteExportsField(exportsField: unknown): unknown {
     return convertSrcExport(exportsField) ?? exportsField;
   }
 
-  if (exportsField && typeof exportsField === "object") {
-    return Object.fromEntries(
-      Object.entries(exportsField as Record<string, unknown>).map(
-        ([key, value]) => {
+    if (isRecord(exportsField)) {
+      return Object.fromEntries(
+        Object.entries(exportsField).map(([key, value]) => {
           if (typeof value === "string") {
             return [key, convertSrcExport(value) ?? value];
           }
 
-          if (value && typeof value === "object") {
+          if (isRecord(value)) {
             const nested = Object.fromEntries(
-              Object.entries(value as Record<string, unknown>).map(
-                ([nestedKey, nestedValue]) => [
-                  nestedKey,
-                  typeof nestedValue === "string"
-                    ? (convertSrcExport(nestedValue) ?? nestedValue)
-                    : nestedValue,
-                ],
-              ),
+              Object.entries(value).map(([nestedKey, nestedValue]) => [
+                nestedKey,
+                typeof nestedValue === "string"
+                  ? (convertSrcExport(nestedValue) ?? nestedValue)
+                  : nestedValue,
+              ]),
             );
 
             return [key, nested];
           }
 
           return [key, value];
-        },
-      ),
-    );
-  }
+        }),
+      );
+    }
 
   return exportsField;
 }
@@ -266,8 +392,12 @@ async function configureYarnVersion(affineDir: string) {
     return;
   }
 
-  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
-  const packageManager = packageJson.packageManager as string | undefined;
+  const packageJsonRaw = JSON.parse(await readFile(packageJsonPath, "utf8"));
+  const packageJson = isRecord(packageJsonRaw) ? packageJsonRaw : {};
+  const packageManager =
+    typeof packageJson.packageManager === "string"
+      ? packageJson.packageManager
+      : undefined;
   const yarnSpec = packageManager?.startsWith("yarn@")
     ? packageManager
     : undefined;
@@ -388,10 +518,10 @@ async function ensureRelease(
     return existing.data;
   } catch (error: unknown) {
     if (
-      typeof error === "object" &&
-      error !== null &&
+      isRecord(error) &&
       "status" in error &&
-      (error as { status?: number }).status === 404
+      typeof error.status === "number" &&
+      error.status === 404
     ) {
       log(`Release for tag ${tag} not found. Creating...`, colors.yellow);
       const created = await octokit.repos.createRelease({
@@ -426,7 +556,9 @@ async function uploadReleaseAssets(
 
   for (const file of files) {
     const name = file.split(/[/\\]/).pop();
-    if (!name) continue;
+    if (!name) {
+      continue;
+    }
 
     const existingId = existingNames.get(name);
     if (existingId) {
@@ -445,7 +577,7 @@ async function uploadReleaseAssets(
       repo,
       release_id: releaseId,
       name,
-      data: buffer as unknown as string,
+      data: buffer,
       headers: {
         "content-length": buffer.byteLength,
         "content-type": "application/gzip",
@@ -554,7 +686,9 @@ async function main() {
     )
     .option("--clean", "Clean the pack directory before packing", false)
     .action(async (options) => {
-      await buildAndMaybeUpload(options as BuildOptions);
+      const buildOptions = parseBuildOptions(options);
+
+      await buildAndMaybeUpload(buildOptions);
     });
 
   program
@@ -606,7 +740,7 @@ async function main() {
       "Tag name used for the release (defaults to <version>)",
     )
     .action(async (options) => {
-      const releaseOptions = options as ReleaseOptions;
+      const releaseOptions = parseReleaseOptions(options);
       const tag = releaseOptions.tag ?? releaseOptions.version;
 
       const affineRef = releaseOptions.affineRef ?? releaseOptions.ref ?? tag;

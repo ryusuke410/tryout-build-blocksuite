@@ -19,6 +19,41 @@ interface CompareOptions {
 
 const REPO_ROOT = resolve(import.meta.dirname, "..");
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseCompareOptions(options: unknown): CompareOptions {
+  if (!isRecord(options)) {
+    throw new Error("Invalid options provided to compare-blocksuite.");
+  }
+
+  if (
+    typeof options.version !== "string" ||
+    typeof options.affineDir !== "string" ||
+    typeof options.packageName !== "string" ||
+    typeof options.packDir !== "string" ||
+    typeof options.skipInstall !== "boolean" ||
+    typeof options.sourceRepo !== "string"
+  ) {
+    throw new Error("Invalid options provided to compare-blocksuite.");
+  }
+
+  if (options.ref !== undefined && typeof options.ref !== "string") {
+    throw new Error("ref must be a string when provided.");
+  }
+
+  return {
+    version: options.version,
+    ref: typeof options.ref === "string" ? options.ref : undefined,
+    affineDir: options.affineDir,
+    packageName: options.packageName,
+    packDir: options.packDir,
+    skipInstall: options.skipInstall,
+    sourceRepo: options.sourceRepo,
+  };
+}
+
 function normalizeBaseName(packageName: string) {
   return packageName.replace("@", "").replace("/", "-");
 }
@@ -125,7 +160,7 @@ async function main() {
     .option("--skip-install", "Skip yarn install inside AFFiNE", false);
 
   program.action(async (cmdOptions) => {
-    const options = cmdOptions as CompareOptions;
+    const options = parseCompareOptions(cmdOptions);
     const baseDir = resolve(REPO_ROOT, options.packDir);
     const baseName = normalizeBaseName(options.packageName);
     const localPackDir = join(baseDir, "local-pack");
